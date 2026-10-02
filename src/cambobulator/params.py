@@ -24,6 +24,7 @@ class Param:
     label: str = ""
     help: str = ""
     choices: tuple[str, ...] = field(default_factory=tuple)
+    group: str = ""  # the UI puts a heading above the first param of each group
 
     def __post_init__(self) -> None:
         if self.kind not in PARAM_KINDS:
@@ -65,6 +66,7 @@ class Param:
             "label": self.label or self.name,
             "help": self.help,
             "choices": list(self.choices),
+            "group": self.group,
         }
 
 

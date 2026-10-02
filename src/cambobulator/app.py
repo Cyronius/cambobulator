@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from cambobulator.config import FilterConfig, Settings
-from cambobulator.filters import available_filters
+from cambobulator.filters.fade import CAPTURE_DELAY, FadeIntoBackground
 from cambobulator.outputs import VirtualCameraError, VirtualCameraOutput
 from cambobulator.pipeline import Pipeline
 from cambobulator.segmentation import Segmenter, make_segmenter
@@ -36,14 +36,15 @@ class Controller:
         self._save_timer: threading.Timer | None = None
         self._save_lock = threading.RLock()
         self._save_due = 0.0
-        for fc in settings.filters:
-            try:
-                slot = self.pipeline.add_filter(fc.type, fc.enabled, fc.params, slot_id=fc.id)
-            except KeyError as exc:
-                log.warning("Skipping filter from config: %s", exc)
-                continue
-            if self.assets_dir is not None:
-                slot.filter.load_assets(self.assets_dir, f"{slot.id}-")
+        # One effect. Configs from the filter-chain days may list others (Mirror, Adjust, ...): skip them.
+        effects = [fc for fc in settings.filters if fc.type == FadeIntoBackground.NAME]
+        dropped = sorted({fc.type for fc in settings.filters} - {FadeIntoBackground.NAME})
+        if dropped:
+            log.info("Ignoring filters from an older config: %s", ", ".join(dropped))
+        fc = effects[0] if effects else FilterConfig(FadeIntoBackground.NAME)
+        slot = self.pipeline.add_filter(fc.type, fc.enabled, fc.params, slot_id=fc.id)
+        if self.assets_dir is not None:
+            slot.filter.load_assets(self.assets_dir, f"{slot.id}-")
 
     @property
     def assets_dir(self) -> Path | None:
@@ -108,24 +109,7 @@ class Controller:
     def vcam_running(self) -> bool:
         return VCAM in self.pipeline.outputs
 
-    # -- filter edits (all of these autosave) ------------------------------
-    def add_filter(self, type_name: str) -> str:
-        slot = self.pipeline.add_filter(type_name)
-        self.schedule_save()
-        return slot.id
-
-    def remove_filter(self, slot_id: str) -> None:
-        self.pipeline.remove_filter(slot_id)
-        self.schedule_save()
-
-    def move_filter(self, slot_id: str, delta: int) -> None:
-        self.pipeline.move(slot_id, delta)
-        self.schedule_save()
-
-    def reorder_filters(self, ids: list[str]) -> None:
-        self.pipeline.reorder(ids)
-        self.schedule_save()
-
+    # -- effect edits (all of these autosave) ------------------------------
     def set_enabled(self, slot_id: str, enabled: bool) -> None:
         self.pipeline.set_enabled(slot_id, enabled)
         self.schedule_save()
@@ -137,9 +121,9 @@ class Controller:
 
     def run_action(self, slot_id: str, action: str) -> None:
         self.pipeline.run_action(slot_id, action)
-        # Captures happen on a later frame (maybe after a countdown), so save a bit later too.
-        delay = self.pipeline.get(slot_id).filter.values.get("capture_delay", 0) if "delayed" in action else 0
-        self.schedule_save(delay=self.autosave_delay + float(delay) + 1.0)
+        # A capture happens after its countdown, so save after that too.
+        delay = CAPTURE_DELAY if action == "capture_background" else 0.0
+        self.schedule_save(delay=self.autosave_delay + delay + 1.0)
 
     # -- persistence ----------------------------------------------------------
     def sync_settings(self) -> Settings:
@@ -200,7 +184,6 @@ class Controller:
             "settings": {k: v for k, v in s.to_dict().items() if k != "filters"},
             "chain": self.pipeline.describe(),
             "chain_version": self.pipeline.version,
-            "available_filters": available_filters(),
             "virtual_camera": {
                 "enabled": s.virtual_camera,
                 "running": self.vcam_running,

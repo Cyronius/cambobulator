@@ -1,6 +1,9 @@
 """Fade into Background: blend the person toward a clean background plate.
 
-    out = lerp(frame, background, fade * person_mask)
+    styled = lerp(frame, look(frame), person_mask)        # brightness etc., person only
+    out    = lerp(styled, background, fade * person_mask)
+
+This is Cambobulator's one effect; the UI shows its parameters directly.
 
 The background plate comes from one of three places, best first:
 
@@ -34,6 +37,11 @@ MASK_WORK_WIDTH = 480
 BACKGROUND_CUTOFF = 0.02
 # The "moving" side of auto-fade drops to 0 in this many seconds.
 AUTO_DROP_SECONDS = 0.35
+# "Capture background" waits this long, so the user can step out of frame.
+CAPTURE_DELAY = 5.0
+# Edge softness in px. Not a slider: the soft ramp sits outside the person, over
+# pixels where frame and plate already match, so changing it is barely visible.
+FEATHER = 14
 
 
 def _ellipse(radius: int) -> np.ndarray:
@@ -85,6 +93,29 @@ def difference_mask(frame: np.ndarray, plate: np.ndarray, level: float = 18.0) -
     return _resize(m, (w, h))
 
 
+def adjust_colors(img: np.ndarray, brightness: float, contrast: float, saturation: float) -> np.ndarray:
+    if saturation != 1.0:
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        hsv[..., 1] = cv2.convertScaleAbs(hsv[..., 1], alpha=saturation)
+        img = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    if brightness != 0.0 or contrast != 1.0:
+        # Contrast pivots around mid-grey so it does not also shift brightness.
+        img = cv2.convertScaleAbs(img, alpha=contrast, beta=brightness + 128.0 * (1.0 - contrast))
+    return img
+
+
+def pixelate_person(img: np.ndarray, person: np.ndarray, block: int) -> np.ndarray:
+    """Blocks of ``block`` px, each the average of the *person* pixels in it, so the
+    room doesn't bleed into blocks along the person's edge."""
+    h, w = img.shape[:2]
+    grid = (max(1, w // block), max(1, h // block))
+    weight = cv2.resize(person, grid, interpolation=cv2.INTER_AREA)
+    weighted = cv2.multiply(img, cv2.cvtColor(person, cv2.COLOR_GRAY2BGR), dtype=cv2.CV_32F)  # 2x numpy's speed
+    total = cv2.resize(weighted, grid, interpolation=cv2.INTER_AREA)
+    small = cv2.convertScaleAbs(total / np.maximum(weight, 1e-4)[..., None])
+    return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+
 @register_filter
 class FadeIntoBackground(Filter):
     NAME = "fade_into_background"
@@ -92,33 +123,37 @@ class FadeIntoBackground(Filter):
     DESCRIPTION = "For people who would rather not be perceived. Blends you into your own background."
     USES_SEGMENTER = True
     PARAMS = (
-        Param("fade", "float", 0.85, 0.0, 1.0, 0.01, "Fade", "0 = normal, 1 = fully invisible"),
-        Param("threshold", "float", 0.5, 0.05, 0.95, 0.01, "Mask threshold",
-              "How sure the segmenter must be that a pixel is you"),
-        Param("grow", "int", 6, 0, 60, 1, "Grow mask (px)", "Expand the mask to hide edge halos"),
-        Param("feather", "int", 14, 0, 80, 1, "Edge feather (px)", "Soften the mask edge (the soft ramp sits outside you)"),
-        Param("bg_learn_rate", "float", 0.01, 0.0, 0.2, 0.005, "Background adapt rate",
-              "How fast the plate follows lighting changes (0 = frozen)"),
-        Param("capture_delay", "float", 3.0, 0.0, 15.0, 0.5, "Capture countdown (s)"),
+        Param("fade", "float", 0.85, 0.0, 1.0, 0.01, "Fade", "0 = normal, 1 = fully invisible", group="Fade"),
         Param("auto_fade", "bool", False, label="Auto-fade when still",
-              help="Fade in while you sit still; snap back when you move or talk"),
+              help="Fade and the person look come in while you sit still; snap back when you move or talk",
+              group="Fade"),
         Param("auto_ramp_seconds", "float", 6.0, 0.5, 60.0, 0.5, "Auto-fade ramp (s)",
-              "Seconds of stillness to reach full fade"),
-        Param("motion_sensitivity", "float", 0.6, 0.0, 1.0, 0.01, "Motion sensitivity"),
+              "Seconds of stillness to reach full fade", group="Fade"),
+        Param("motion_sensitivity", "float", 0.6, 0.0, 1.0, 0.01, "Motion sensitivity", group="Fade"),
         Param("shimmer", "float", 0.0, 0.0, 1.0, 0.01, "Predator shimmer",
-              "Refraction ripple, strongest at half fade"),
+              "Refraction ripple, strongest at half fade", group="Fade"),
+        Param("brightness", "float", 0.0, -100, 100, 1, "Brightness", group="Person"),
+        Param("contrast", "float", 1.0, 0.2, 3.0, 0.05, "Contrast", group="Person"),
+        Param("saturation", "float", 1.0, 0.0, 3.0, 0.05, "Saturation", group="Person"),
+        Param("pixelate", "int", 0, 0, 96, 1, "Pixelate (px)", "Block size; 0 = off", group="Person"),
+        Param("threshold", "float", 0.5, 0.05, 0.95, 0.01, "Mask threshold",
+              "How sure the segmenter must be that a pixel is you", group="Mask"),
+        Param("grow", "int", 6, 0, 60, 1, "Grow mask (px)", "Expand the mask to hide edge halos", group="Mask"),
+        Param("bg_learn_rate", "float", 0.01, 0.0, 0.2, 0.005, "Background adapt rate",
+              "How fast the plate follows lighting changes (0 = frozen)", group="Background"),
     )
     ACTIONS = (
-        Action("capture_background", "Capture background now", "Step out of frame first"),
-        Action("capture_background_delayed", "Capture after countdown", "Gives you time to step out"),
+        Action("capture_background", f"Capture background ({CAPTURE_DELAY:.0f} s countdown)",
+               "Step out of frame before it fires"),
         Action("clear_background", "Forget background"),
     )
+
+    feather = FEATHER  # tests set 0 for exact edges
 
     def __init__(self, segmenter=None, **values: Any) -> None:
         super().__init__(segmenter=segmenter, **values)
         self._grid_cache: tuple[tuple[int, int], np.ndarray, np.ndarray] | None = None
         self._clear_state()
-        self._capture_now = False
         self._countdown_requested = False
         self._capture_at: float | None = None
         self._last_now: float | None = None
@@ -138,13 +173,10 @@ class FadeIntoBackground(Filter):
 
     # -- actions ------------------------------------------------------------
     def action_capture_background(self) -> None:
-        self._capture_now = True
-
-    def action_capture_background_delayed(self) -> None:
-        self._countdown_requested = True
+        self._countdown_requested = True  # the countdown starts on the next frame's timestamp
 
     def action_clear_background(self) -> None:
-        self._capture_now = self._countdown_requested = False
+        self._countdown_requested = False
         self._capture_at = None
         self._clear_state()
 
@@ -204,7 +236,7 @@ class FadeIntoBackground(Filter):
         if self._capture_at is not None and self._last_now is not None:
             countdown = round(max(0.0, self._capture_at - self._last_now), 1)
         elif self._countdown_requested:
-            countdown = float(self["capture_delay"])
+            countdown = CAPTURE_DELAY
         return {
             "background": background,
             "mask_source": self._mode,
@@ -225,7 +257,7 @@ class FadeIntoBackground(Filter):
             self._on_new_shape(h, w)
         if self._countdown_requested:
             self._countdown_requested = False
-            self._capture_at = now + self["capture_delay"]
+            self._capture_at = now + CAPTURE_DELAY
 
         raw = self.segmenter.segment(frame) if self.segmenter is not None else None
         if raw is not None:
@@ -236,7 +268,7 @@ class FadeIntoBackground(Filter):
         else:
             self._mode = "unavailable"
 
-        if self._capture_now or (self._capture_at is not None and now >= self._capture_at):
+        if self._capture_at is not None and now >= self._capture_at:
             self._capture(frame, raw)
             return frame
 
@@ -250,16 +282,20 @@ class FadeIntoBackground(Filter):
         if self._warning.startswith("Person segmentation"):
             self._warning = ""
 
-        person = refine_mask(raw, self["threshold"], self["grow"], self["feather"])
+        person = refine_mask(raw, self["threshold"], self["grow"], self.feather)
         self._learn_background(frame, person)
 
-        fade = self["fade"]
+        # Auto-fade scales everything: the fade and the person look.
+        level = 1.0
         if self["auto_fade"]:
             self._update_auto_level(frame, person, dt)
-            fade *= self._auto_level
+            level = self._auto_level
+        fade = self["fade"] * level
         self._effective_fade = fade
+        # Background learning and motion detection above use the unstyled frame.
+        styled = self._restyle_person(frame, person, level)
         if fade <= 0.0:
-            return frame
+            return styled
 
         if self._all_valid:
             background = cv2.convertScaleAbs(self._plate)  # float -> uint8, rounded and saturated
@@ -269,7 +305,22 @@ class FadeIntoBackground(Filter):
             background = self._refract(background, person, fade, now)
 
         alpha = person * np.float32(fade)
-        return cv2.blendLinear(background, frame, alpha, 1.0 - alpha)
+        return cv2.blendLinear(background, styled, alpha, 1.0 - alpha)
+
+    def _restyle_person(self, frame: np.ndarray, person: np.ndarray, amount: float = 1.0) -> np.ndarray:
+        """Brightness / contrast / saturation and pixelate, applied to the person only.
+
+        ``amount`` crossfades the look in (auto-fade). For brightness and contrast
+        that's the same as scaling the slider values toward neutral.
+        """
+        b, c, s, block = self["brightness"], self["contrast"], self["saturation"], self["pixelate"]
+        if amount <= 0.0 or (b == 0.0 and c == 1.0 and s == 1.0 and block < 2):
+            return frame
+        look = adjust_colors(frame, b, c, s)
+        if block >= 2:
+            look = pixelate_person(look, person, block)
+        weight = person * np.float32(amount)
+        return cv2.blendLinear(look, frame, weight, 1.0 - weight)
 
     def _on_new_shape(self, h: int, w: int) -> None:
         if self._captured and self._plate is not None:
@@ -283,7 +334,6 @@ class FadeIntoBackground(Filter):
         self._prev_gray = None
 
     def _capture(self, frame: np.ndarray, raw: np.ndarray | None) -> None:
-        self._capture_now = False
         self._capture_at = None
         self.set_background(frame)
         # Only trust a real segmenter here; the difference mask was computed

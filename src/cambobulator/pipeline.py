@@ -1,4 +1,4 @@
-"""Source -> ordered filter chain -> outputs."""
+"""Source -> filters (in practice the one effect) -> outputs."""
 
 from __future__ import annotations
 
@@ -33,9 +33,9 @@ class FilterSlot:
 
 
 class Pipeline:
-    """Owns the filter chain, the capture thread and the processing thread.
+    """Owns the filters, the capture thread and the processing thread.
 
-    All chain edits and frame processing happen under ``self.lock``, so the UI
+    Parameter changes and frame processing happen under ``self.lock``, so the UI
     thread can change parameters while frames flow.
     """
 
@@ -58,12 +58,12 @@ class Pipeline:
         self._fps = 0.0
         self._process_ms = 0.0
 
-    # -- chain editing ----------------------------------------------------
+    # -- filters ----------------------------------------------------------
     def _changed(self) -> None:
         self.version += 1
 
     def add_filter(self, type_name: str, enabled: bool = True, params: dict[str, Any] | None = None,
-                   slot_id: str | None = None, index: int | None = None) -> FilterSlot:
+                   slot_id: str | None = None) -> FilterSlot:
         f = create_filter(type_name, segmenter=self.segmenter)
         for name, value in (params or {}).items():
             try:
@@ -72,10 +72,7 @@ class Pipeline:
                 log.warning("Ignoring setting %s=%r for %s: %s", name, value, type_name, exc)
         slot = FilterSlot(f, enabled, slot_id or uuid.uuid4().hex[:8])
         with self.lock:
-            if index is None:
-                self.slots.append(slot)
-            else:
-                self.slots.insert(index, slot)
+            self.slots.append(slot)
             self._changed()
         return slot
 
@@ -85,27 +82,6 @@ class Pipeline:
                 if slot.id == slot_id:
                     return slot
         raise KeyError(f"No filter with id {slot_id!r}")
-
-    def remove_filter(self, slot_id: str) -> None:
-        with self.lock:
-            self.slots.remove(self.get(slot_id))
-            self._changed()
-
-    def reorder(self, ids: list[str]) -> None:
-        with self.lock:
-            by_id = {s.id: s for s in self.slots}
-            if sorted(ids) != sorted(by_id):
-                raise ValueError("reorder needs every filter id exactly once")
-            self.slots = [by_id[i] for i in ids]
-            self._changed()
-
-    def move(self, slot_id: str, delta: int) -> None:
-        with self.lock:
-            slot = self.get(slot_id)
-            i = self.slots.index(slot)
-            j = min(max(i + delta, 0), len(self.slots) - 1)
-            self.slots.insert(j, self.slots.pop(i))
-            self._changed()
 
     def set_enabled(self, slot_id: str, enabled: bool) -> None:
         with self.lock:

@@ -97,37 +97,10 @@ def create_app(controller: Controller) -> FastAPI:
         ok = controller.set_virtual_camera(bool(body.get("enabled")))
         return {"ok": ok, "error": controller.vcam_error, "device": controller.vcam_device}
 
-    @app.post("/api/filters")
-    def add_filter(body: dict = Body(...)) -> dict[str, Any]:
-        try:
-            return {"id": controller.add_filter(str(body["type"]))}
-        except KeyError as exc:
-            raise HTTPException(400, str(exc)) from None
-
-    @app.post("/api/filters/order")
-    def reorder(body: dict = Body(...)) -> dict[str, Any]:
-        try:
-            controller.reorder_filters(list(body["ids"]))
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(400, str(exc)) from None
-        return {"ok": True}
-
-    @app.delete("/api/filters/{slot_id}")
-    def remove_filter(slot_id: str) -> dict[str, Any]:
-        slot_or_404(slot_id)
-        controller.remove_filter(slot_id)
-        return {"ok": True}
-
     @app.post("/api/filters/{slot_id}/enabled")
     def set_enabled(slot_id: str, body: dict = Body(...)) -> dict[str, Any]:
         slot_or_404(slot_id)
         controller.set_enabled(slot_id, bool(body.get("enabled")))
-        return {"ok": True}
-
-    @app.post("/api/filters/{slot_id}/move")
-    def move(slot_id: str, body: dict = Body(...)) -> dict[str, Any]:
-        slot_or_404(slot_id)
-        controller.move_filter(slot_id, int(body.get("delta", 0)))
         return {"ok": True}
 
     @app.post("/api/filters/{slot_id}/params")

@@ -8,12 +8,13 @@ version = "0.1.0"
 description = "A software-defined virtual webcam: real camera -> filter chain -> virtual camera."
 readme = "README.md"
 requires-python = ">=3.10"
+classifiers = ["Operating System :: Microsoft :: Windows"]
 license = { text = "MIT" }
 dependencies = [
     "numpy>=1.23",
-    "opencv-python>=4.8",
+    # 4.9+: older dnn modules run the bundled segmentation model wrong.
+    "opencv-python>=4.9",
     "pyvirtualcam>=0.11",
-    "mediapipe>=0.10.9",
     "fastapi>=0.100",
     "uvicorn>=0.23",
     "pygrabber>=0.2; sys_platform == 'win32'",
@@ -21,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "httpx>=0.24"]
+build = ["pyinstaller>=6.10"]
 
 [project.scripts]
 cambobulator = "cambobulator.cli:main"
@@ -29,7 +31,7 @@ cambobulator = "cambobulator.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-cambobulator = ["web/*.html"]
+cambobulator = ["web/*.html", "models/*", "virtualcam/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

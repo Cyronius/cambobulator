@@ -1,0 +1,18 @@
+OBS Virtual Camera DirectShow module, vendored unmodified from OBS Studio.
+
+Files:
+  obs-virtualcam-module64.dll  sha256 0dcde4a969a7ce45a39472d39bd15f5bfff242a06449b27c61e20e667358ec34
+  obs-virtualcam-module32.dll  sha256 e9513840e2b96db8ceeb41cf6f5fdb85e58fe7dc44b6b9afb62b198c5505aa88
+
+Taken from data/obs-plugins/win-dshow/ in
+  https://github.com/obsproject/obs-studio/releases/download/32.2.2/OBS-Studio-32.2.2-Windows-x64.zip
+
+Source code (tag 32.2.2):
+  https://github.com/obsproject/obs-studio/tree/32.2.2/plugins/win-dshow/virtualcam-module
+
+License: GNU General Public License v2 or later; see COPYING.txt. Copyright the OBS Studio
+contributors. These two DLLs are covered by the GPL; the rest of Cambobulator talks to them only
+through Windows COM registration and a shared-memory frame queue.
+
+placeholder.png is Cambobulator's own image (shown by the module while Cambobulator isn't sending
+frames); it is not from OBS.

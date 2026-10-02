@@ -1,4 +1,4 @@
-"""Command-line entry point: ``cambobulator ui | run | cameras | filters``."""
+"""Command-line entry point: ``cambobulator ui | run | cameras | filters | driver``."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--width", type=int)
     p.add_argument("--height", type=int)
     p.add_argument("--fps", type=int)
-    p.add_argument("--segmenter", choices=("auto", "mediapipe", "none", "synthetic"), help="person segmentation backend")
+    p.add_argument("--segmenter", choices=("auto", "none", "synthetic"), help="person segmentation backend")
     p.add_argument("-v", "--verbose", action="store_true")
 
 
@@ -48,8 +48,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     cams = sub.add_parser("cameras", help="list cameras")
     cams.add_argument("-v", "--verbose", action="store_true")
-    flt = sub.add_parser("filters", help="list available filters and their parameters")
+    flt = sub.add_parser("filters", help="list the effect's parameters")
     flt.add_argument("-v", "--verbose", action="store_true")
+
+    drv = sub.add_parser("driver", help="install or remove the Windows virtual camera driver")
+    drv.add_argument("action", choices=("status", "install", "uninstall"))
+    drv.add_argument("--force", action="store_true", help="install over a driver registered by OBS Studio")
+    drv.add_argument("--apply", action="store_true", help=argparse.SUPPRESS)  # the elevated helper
+    drv.add_argument("--log", type=Path, help=argparse.SUPPRESS)
+    drv.add_argument("-v", "--verbose", action="store_true")
     return parser
 
 
@@ -77,9 +84,8 @@ def cmd_cameras(args: argparse.Namespace) -> int:
 
 
 def cmd_filters(args: argparse.Namespace) -> int:
-    from cambobulator.filters import available_filters, get_filter_class, load_plugins
+    from cambobulator.filters import available_filters, get_filter_class
 
-    load_plugins()
     for info in available_filters():
         cls = get_filter_class(info["type"])
         print(f"{info['type']}  -  {info['label']}")
@@ -94,11 +100,36 @@ def cmd_filters(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_driver(args: argparse.Namespace) -> int:
+    from cambobulator import driver
+
+    if args.apply:  # we are the elevated helper; the caller reads --log
+        lines, code = [], 0
+        try:
+            lines = driver.apply_install() if args.action == "install" else driver.apply_uninstall()
+        except Exception as exc:
+            lines, code = [str(exc)], 1
+        if args.log:
+            args.log.write_text("\n".join(lines), encoding="utf-8")
+        return code
+    try:
+        if args.action == "install":
+            driver.install(force=args.force)
+            # So apps opened before Cambobulator's first run still see a usable format.
+            s = Settings.load(default_config_path())
+            driver.write_format_hint(s.width, s.height, s.fps)
+        elif args.action == "uninstall":
+            driver.uninstall()
+    except driver.DriverError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    print(f"Virtual camera driver: {driver.status().describe()}")
+    return 0
+
+
 def _make_controller(args: argparse.Namespace):
     from cambobulator.app import Controller
-    from cambobulator.filters import load_plugins
 
-    load_plugins()
     settings, path = _settings_from_args(args)
     return Controller(settings, path)
 
@@ -118,10 +149,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.record:
         controller.pipeline.add_output("record", VideoFileOutput(args.record, s.width, s.height, s.fps))
     if args.capture_background:
-        for slot in controller.pipeline.slots:
-            if any(a.name == "capture_background_delayed" for a in slot.filter.ACTIONS):
-                controller.run_action(slot.id, "capture_background_delayed")
-                print(f"Capturing the background in {slot.filter['capture_delay']:.0f} s. Step out of frame!")
+        from cambobulator.filters.fade import CAPTURE_DELAY
+
+        controller.run_action(controller.pipeline.slots[0].id, "capture_background")
+        print(f"Capturing the background in {CAPTURE_DELAY:.0f} s. Step out of frame!")
 
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -180,9 +211,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         args = parser.parse_args(["ui", *(argv if argv is not None else sys.argv[1:])])
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("comtypes").setLevel(logging.WARNING)  # narrates its code generation at INFO
     if getattr(args, "verbose", False):
         log.setLevel(logging.DEBUG)
-    return {"ui": cmd_ui, "run": cmd_run, "cameras": cmd_cameras, "filters": cmd_filters}[args.command](args)
+    commands = {"ui": cmd_ui, "run": cmd_run, "cameras": cmd_cameras, "filters": cmd_filters, "driver": cmd_driver}
+    return commands[args.command](args)
 
 
 if __name__ == "__main__":

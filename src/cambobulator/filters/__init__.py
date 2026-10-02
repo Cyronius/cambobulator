@@ -1,20 +1,14 @@
 """Filter registry.
 
-To add a filter, subclass :class:`Filter` and decorate it with
-:func:`register_filter`. Built-in filters live in this package. Third-party
-packages can expose filters through the ``cambobulator.filters`` entry-point
-group; :func:`load_plugins` imports them.
+The app runs a single effect (``fade.FadeIntoBackground``); the registry maps
+the name stored in the config file to its class.
 """
 
 from __future__ import annotations
 
-import logging
-from importlib.metadata import entry_points
 from typing import Any
 
 from cambobulator.filters.base import Filter, FrameContext
-
-log = logging.getLogger(__name__)
 
 _REGISTRY: dict[str, type[Filter]] = {}
 
@@ -51,24 +45,8 @@ def create_filter(name: str, segmenter=None, **params: Any) -> Filter:
     return get_filter_class(name)(segmenter=segmenter, **params)
 
 
-_plugins_loaded = False
-
-
-def load_plugins() -> None:
-    """Import filters advertised by other installed packages."""
-    global _plugins_loaded
-    if _plugins_loaded:
-        return
-    _plugins_loaded = True
-    for ep in entry_points(group="cambobulator.filters"):
-        try:
-            ep.load()
-        except Exception:  # a broken plugin must not take the camera down
-            log.exception("Failed to load filter plugin %s", ep.name)
-
-
 # Import built-ins so they register themselves.
-from cambobulator.filters import basic, fade  # noqa: E402,F401
+from cambobulator.filters import fade  # noqa: E402,F401
 
 __all__ = [
     "Filter",
@@ -76,7 +54,6 @@ __all__ = [
     "available_filters",
     "create_filter",
     "get_filter_class",
-    "load_plugins",
     "register_filter",
     "unregister_filter",
 ]
