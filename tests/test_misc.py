@@ -1,13 +1,16 @@
 import json
 import sys
 import types
+from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 
 from cambobulator import cli
+from cambobulator.app import Controller
 from cambobulator.config import FilterConfig, Settings
+from cambobulator.driver import write_format_hint  # the real one; conftest stubs the module attribute
 from cambobulator.filters import (
     Filter,
     available_filters,
@@ -18,8 +21,10 @@ from cambobulator.filters import (
 )
 from cambobulator.outputs import VirtualCameraError, VirtualCameraOutput, virtual_camera_help
 from cambobulator.params import Param
-from cambobulator.segmentation import LazySegmenter, NullSegmenter, make_segmenter
+from cambobulator.segmentation import LazySegmenter, NullSegmenter, SelfieSegmenter, make_segmenter
 from cambobulator.sources import SourceError, SyntheticSource, VideoFileSource, open_source
+
+DATA = Path(__file__).parent / "data"
 
 
 # -- params -------------------------------------------------------------------
@@ -41,15 +46,8 @@ def test_param_coercion():
 
 
 # -- registry -------------------------------------------------------------------
-def test_registry_and_basic_filters():
-    names = {f["type"] for f in available_filters()}
-    assert {"fade_into_background", "mirror", "adjust", "pixelate"} <= names
-    frame = np.random.default_rng(1).integers(0, 255, (24, 32, 3), dtype=np.uint8)
-    for name in ("mirror", "adjust", "pixelate"):
-        out = create_filter(name).process(frame.copy())
-        assert out.shape == frame.shape and out.dtype == np.uint8
-    adj = create_filter("adjust")
-    assert np.array_equal(adj.process(frame.copy()), frame)  # defaults are identity
+def test_registry_knows_only_the_effect():
+    assert [f["type"] for f in available_filters()] == ["fade_into_background"]
     with pytest.raises(KeyError):
         get_filter_class("nope")
 
@@ -97,6 +95,18 @@ def test_settings_defaults_and_bad_files(tmp_path):
     extra.write_text(json.dumps({"source": 2, "future_option": True, "filters": [{"nope": 1}]}))
     s = Settings.load(extra)
     assert s.source == "2" and s.filters == []
+
+
+def test_old_filter_chain_config_loads_as_the_one_effect():
+    old = Settings(source="synthetic", filters=[
+        FilterConfig("mirror"),
+        FilterConfig("fade_into_background", params={"fade": 0.4, "feather": 30, "capture_delay": 3}, id="f1"),
+        FilterConfig("pixelate", params={"block": 8}),
+    ])
+    slots = Controller(old, None, segmenter=NullSegmenter()).pipeline.slots
+    assert [(s.id, s.filter.NAME, s.filter["fade"]) for s in slots] == [("f1", "fade_into_background", 0.4)]
+    assert Controller(Settings(filters=[]), None, segmenter=NullSegmenter()).pipeline.slots[0].filter.NAME \
+        == "fade_into_background"
 
 
 # -- sources -------------------------------------------------------------------
@@ -148,6 +158,21 @@ def test_lazy_segmenter_falls_back_on_failure():
         make_segmenter("magic")
 
 
+def test_selfie_segmenter_matches_mediapipe():
+    # The bundled ONNX model must give the same mask MediaPipe gave for this photo (see tests/data/README.txt).
+    frame = cv2.imread(str(DATA / "portrait_256x144.png"))
+    expected = cv2.imread(str(DATA / "portrait_256x144_mediapipe_mask.png"), cv2.IMREAD_GRAYSCALE) / 255.0
+    seg = SelfieSegmenter()
+    mask = seg.segment(frame)
+    assert mask.shape == (144, 256) and mask.dtype == np.float32
+    assert np.abs(mask - expected).max() < 0.01
+    # A full-size frame is shrunk for the model and the mask comes back at frame size.
+    big = seg.segment(cv2.resize(frame, (1280, 720), interpolation=cv2.INTER_CUBIC))
+    assert big.shape == (720, 1280)
+    person, truth = big > 0.5, cv2.resize(expected, (1280, 720)) > 0.5
+    assert (person & truth).sum() / (person | truth).sum() > 0.97
+
+
 # -- virtual camera errors ---------------------------------------------------------
 def test_virtual_camera_error_explains_setup(monkeypatch):
     fake = types.ModuleType("pyvirtualcam")
@@ -165,6 +190,13 @@ def test_virtual_camera_error_explains_setup(monkeypatch):
         VirtualCameraOutput(640, 480, 30)
     assert "could not be started" in str(err.value)
     assert virtual_camera_help() in str(err.value)
+
+
+def test_format_hint_uses_obs_file_format(tmp_path):
+    # OBS's module sscanf's "%ux%ux%llu": width x height x frame interval in 100 ns units.
+    path = tmp_path / "obs-virtualcam.txt"
+    write_format_hint(1280, 720, 30, path)
+    assert path.read_text() == "1280x720x333333"
 
 
 def test_virtual_camera_help_mentions_platform_driver(monkeypatch):

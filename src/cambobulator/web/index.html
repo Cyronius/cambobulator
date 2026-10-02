@@ -24,27 +24,31 @@
   figcaption { padding: 6px 10px; color: var(--muted); background: var(--panel); }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
   .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  .panel-head h2 { margin: 0; }
   .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .row.nowrap { flex-wrap: nowrap; }
   .row label { color: var(--muted); }
+  #camera { flex: 1; min-width: 0; }
   input[type=text], input[type=number], select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 7px; }
   input[type=number] { width: 72px; }
   button { background: #2b3240; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
   button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .6; cursor: default; }
   button.primary { background: var(--accent); color: #0b1220; border-color: var(--accent); font-weight: 600; }
   button.on { background: var(--good); color: #0b1220; border-color: var(--good); font-weight: 600; }
-  button.icon { padding: 3px 8px; }
+  button.icon { padding: 3px 8px; flex: none; }
   .error { color: var(--bad); white-space: pre-wrap; font-size: 12px; }
   .warn { color: var(--warn); font-size: 12px; }
   .muted { color: var(--muted); font-size: 12px; }
-  .filter { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 10px; background: #1a1e25; }
-  .filter.disabled { opacity: .6; }
-  .filter-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
-  .filter-head .name { font-weight: 600; flex: 1; }
+  .toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); cursor: pointer; }
+  #params h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 4px; padding-top: 8px; border-top: 1px solid var(--line); }
+  .panel.off #params, .panel.off #actions { opacity: .5; }
   .param { display: grid; grid-template-columns: 150px 1fr 48px; gap: 8px; align-items: center; margin: 4px 0; }
   .param .val { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
   .param input[type=range] { width: 100%; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-  .status { margin-top: 6px; }
+  .status { margin: 6px 0; }
 </style>
 </head>
 <body>
@@ -67,9 +71,9 @@
   <aside>
     <div class="panel">
       <h2>Source</h2>
-      <div class="row">
+      <div class="row nowrap">
         <select id="camera"></select>
-        <button id="refreshCams" title="Look for cameras again">↻</button>
+        <button id="refreshCams" class="icon" title="Look for cameras again">↻</button>
       </div>
       <div class="row">
         <input id="sourceText" type="text" placeholder="camera index, 'synthetic' or video path" style="flex:1">
@@ -81,12 +85,14 @@
       <div class="row"><button class="primary" id="applySource">Use this source</button></div>
       <div class="muted" id="camNote"></div>
     </div>
-    <div class="panel">
-      <h2>Filters (top runs first)</h2>
-      <div id="chain"></div>
-      <div class="row">
-        <select id="addType"></select><button id="addFilter">Add filter</button>
+    <div class="panel" id="effect">
+      <div class="panel-head">
+        <h2 id="effectName">Effect</h2>
+        <label class="toggle" title="Turn the effect off to see the plain camera"><input type="checkbox" id="effectOn"> On</label>
       </div>
+      <div id="params"></div>
+      <div class="actions" id="actions"></div>
+      <div class="status" id="status"></div>
       <div class="muted" id="configPath"></div>
     </div>
   </aside>
@@ -94,6 +100,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let state = null, renderedVersion = -1;
+const effect = () => state.chain[0];
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -157,65 +164,57 @@ function paramControl(slot, p) {
   return wrap;
 }
 
-function renderChain() {
-  const root = $("chain");
-  root.innerHTML = "";
-  if (!state.chain.length) root.innerHTML = '<div class="muted">No filters. Output = raw camera.</div>';
-  state.chain.forEach((slot, i) => {
-    const box = document.createElement("div");
-    box.className = "filter" + (slot.enabled ? "" : " disabled");
-    box.dataset.id = slot.id;
-    const head = document.createElement("div");
-    head.className = "filter-head";
-    const en = document.createElement("input");
-    en.type = "checkbox"; en.checked = slot.enabled; en.title = "Enabled";
-    en.onchange = async () => { await api("POST", `/api/filters/${slot.id}/enabled`, { enabled: en.checked }); refresh(true); };
-    const name = document.createElement("span");
-    name.className = "name"; name.textContent = slot.label; name.title = slot.description;
-    const up = document.createElement("button"); up.className = "icon"; up.textContent = "↑"; up.disabled = i === 0;
-    up.onclick = async () => { await api("POST", `/api/filters/${slot.id}/move`, { delta: -1 }); refresh(true); };
-    const down = document.createElement("button"); down.className = "icon"; down.textContent = "↓"; down.disabled = i === state.chain.length - 1;
-    down.onclick = async () => { await api("POST", `/api/filters/${slot.id}/move`, { delta: 1 }); refresh(true); };
-    const del = document.createElement("button"); del.className = "icon"; del.textContent = "✕"; del.title = "Remove";
-    del.onclick = async () => { await api("DELETE", `/api/filters/${slot.id}`); refresh(true); };
-    head.append(en, name, up, down, del);
-    box.append(head);
-    for (const p of slot.params) box.append(paramControl(slot, p));
-    if (slot.actions.length) {
-      const acts = document.createElement("div");
-      acts.className = "actions";
-      for (const a of slot.actions) {
-        const b = document.createElement("button");
-        b.textContent = a.label; b.title = a.help || "";
-        b.onclick = () => api("POST", `/api/filters/${slot.id}/actions/${a.name}`);
-        acts.append(b);
-      }
-      box.append(acts);
+function renderEffect() {
+  const slot = effect();
+  $("effectName").textContent = slot.label;
+  $("effectName").title = slot.description;
+  $("effectOn").checked = slot.enabled;
+  $("effect").classList.toggle("off", !slot.enabled);
+  const params = $("params");
+  params.innerHTML = "";
+  let group = null;
+  for (const p of slot.params) {
+    if (p.group && p.group !== group) {
+      group = p.group;
+      const h = document.createElement("h3"); h.textContent = group; params.append(h);
     }
-    const st = document.createElement("div");
-    st.className = "status";
-    box.append(st);
-    root.append(box);
-  });
+    params.append(paramControl(slot, p));
+  }
+  // The buttons belong to the last group (Background).
+  const acts = $("actions");
+  acts.innerHTML = "";
+  for (const a of slot.actions) {
+    const b = document.createElement("button");
+    b.textContent = a.label; b.title = a.help || "";
+    b.dataset.action = a.name; b.dataset.label = a.label;
+    b.onclick = async () => { await api("POST", `/api/filters/${slot.id}/actions/${a.name}`); refresh(); };
+    acts.append(b);
+  }
   renderedVersion = state.chain_version;
   renderStatus();
 }
 
 function renderStatus() {
-  for (const slot of state.chain) {
-    const box = document.querySelector(`.filter[data-id="${slot.id}"] .status`);
-    if (!box) continue;
-    const parts = [];
-    for (const [k, v] of Object.entries(slot.status || {})) {
-      if (v === null || v === "" || k === "warning") continue;
-      parts.push(`${k.replace(/_/g, " ")}: ${k === "countdown" ? v + " s" : v}`);
-    }
-    box.innerHTML = "";
-    const m = document.createElement("div"); m.className = "muted"; m.textContent = parts.join(" · ");
-    box.append(m);
-    if (slot.status && slot.status.warning) { const w = document.createElement("div"); w.className = "warn"; w.textContent = slot.status.warning; box.append(w); }
-    if (slot.error) { const e = document.createElement("div"); e.className = "error"; e.textContent = "Error: " + slot.error; box.append(e); }
+  const slot = effect();
+  const st = slot.status || {};
+  const capture = document.querySelector('#actions button[data-action="capture_background"]');
+  const counting = st.countdown !== null && st.countdown !== undefined;
+  if (capture) {
+    capture.disabled = counting;
+    capture.textContent = !counting ? capture.dataset.label
+      : st.countdown > 0 ? `Capturing in ${Math.ceil(st.countdown)} s… step out of frame` : "Capturing…";
   }
+  const parts = [];
+  for (const [k, v] of Object.entries(st)) {
+    if (v === null || v === "" || k === "warning" || k === "countdown") continue;
+    parts.push(`${k.replace(/_/g, " ")}: ${v}`);
+  }
+  const box = $("status");
+  box.innerHTML = "";
+  const m = document.createElement("div"); m.className = "muted"; m.textContent = parts.join(" · ");
+  box.append(m);
+  if (st.warning) { const w = document.createElement("div"); w.className = "warn"; w.textContent = st.warning; box.append(w); }
+  if (slot.error) { const e = document.createElement("div"); e.className = "error"; e.textContent = "Error: " + slot.error; box.append(e); }
 }
 
 function renderHeader() {
@@ -235,7 +234,7 @@ function renderHeader() {
 async function refresh(force) {
   state = await api("GET", "/api/state");
   renderHeader();
-  if (force || state.chain_version !== renderedVersion) renderChain(); else renderStatus();
+  if (force || state.chain_version !== renderedVersion) renderEffect(); else renderStatus();
 }
 
 async function loadCameras() {
@@ -269,12 +268,14 @@ $("vcam").onclick = async () => {
   await api("POST", "/api/virtual-camera", { enabled: !state.virtual_camera.running });
   refresh();
 };
-$("addFilter").onclick = async () => { await api("POST", "/api/filters", { type: $("addType").value }); refresh(true); };
+$("effectOn").onchange = async () => {
+  await api("POST", `/api/filters/${effect().id}/enabled`, { enabled: $("effectOn").checked });
+  refresh(true);
+};
 
 (async () => {
   await refresh(true);
   $("width").value = state.settings.width; $("height").value = state.settings.height; $("fps").value = state.settings.fps;
-  for (const f of state.available_filters) $("addType").add(new Option(f.label, f.type));
   loadCameras();
   setInterval(() => refresh(false).catch(() => {}), 1000);
 })();

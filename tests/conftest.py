@@ -45,6 +45,15 @@ class MaskBox:
         pass
 
 
+@pytest.fixture(autouse=True)
+def no_driver_install(monkeypatch):
+    """Tests must never pop a UAC prompt to install the virtual-camera driver, or touch its files."""
+    from cambobulator import driver
+
+    monkeypatch.setattr(driver, "is_installed", lambda: True)
+    monkeypatch.setattr(driver, "write_format_hint", lambda *a, **kw: None)
+
+
 @pytest.fixture
 def scene():
     bg = make_background()

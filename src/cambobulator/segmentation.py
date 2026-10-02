@@ -12,9 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import threading
-import urllib.request
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -23,11 +21,8 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/image_segmenter/"
-    "selfie_segmenter_landscape/float16/latest/selfie_segmenter_landscape.tflite"
-)
-MODEL_FILENAME = "selfie_segmenter_landscape.tflite"
+MODEL_PATH = Path(__file__).parent / "models" / "selfie_segmenter_landscape.onnx"
+MODEL_SIZE = (256, 144)  # (width, height) the model takes
 
 
 class Segmenter(Protocol):
@@ -67,106 +62,36 @@ class CallableSegmenter:
         pass
 
 
-def cache_dir() -> Path:
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-    elif sys.platform == "darwin":
-        base = Path.home() / "Library" / "Caches"
-    else:
-        base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    return base / "cambobulator"
+class SelfieSegmenter:
+    """MediaPipe's selfie segmentation model (bundled as ONNX), run by OpenCV's dnn module.
 
-
-def ensure_model(path: str | os.PathLike | None = None) -> Path:
-    """Return a local path to the segmentation model, downloading it once if needed."""
-    if path:
-        p = Path(path).expanduser()
-        if not p.is_file():
-            raise FileNotFoundError(f"Segmentation model not found: {p}")
-        return p
-    p = cache_dir() / MODEL_FILENAME
-    if p.is_file() and p.stat().st_size > 0:
-        return p
-    p.parent.mkdir(parents=True, exist_ok=True)
-    log.info("Downloading person-segmentation model to %s", p)
-    tmp = p.with_suffix(".part")
-    try:
-        with urllib.request.urlopen(MODEL_URL, timeout=30) as resp, open(tmp, "wb") as fh:
-            fh.write(resp.read())
-        tmp.replace(p)
-    except OSError as exc:
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"Could not download the segmentation model from {MODEL_URL} ({exc}). "
-            f"Download it by hand and set 'segmenter_model' in the config, or put it at {p}."
-        ) from exc
-    return p
-
-
-class MediaPipeSegmenter:
-    """MediaPipe selfie segmentation (Tasks API, with the legacy API as fallback).
-
-    The model works on a small image (256x144), so we downscale first; that
-    keeps the cost to a few milliseconds per frame on a laptop CPU.
+    The model sees a 256x144 RGB image, so each frame is shrunk to that first
+    (frames that aren't 16:9 get stretched, and so does the mask on the way
+    back). That keeps the cost to a few milliseconds per frame on a laptop CPU.
     """
 
-    name = "mediapipe"
+    name = "selfie segmenter"
 
-    def __init__(self, model_path: str | None = None, work_width: int = 256) -> None:
-        self.work_width = work_width
-        self._tasks = None
-        self._legacy = None
-        try:
-            import mediapipe as mp  # noqa: F401
-        except ImportError as exc:
-            raise RuntimeError("mediapipe is not installed (pip install mediapipe)") from exc
-        try:
-            from mediapipe.tasks.python import BaseOptions, vision
-
-            options = vision.ImageSegmenterOptions(
-                base_options=BaseOptions(model_asset_path=str(ensure_model(model_path))),
-                running_mode=vision.RunningMode.IMAGE,
-                output_confidence_masks=True,
-                output_category_mask=False,
-            )
-            self._tasks = vision.ImageSegmenter.create_from_options(options)
-        except Exception as tasks_exc:
-            # Older mediapipe builds ship the legacy "solutions" API.
-            solutions = getattr(mp, "solutions", None)
-            if solutions is None or not hasattr(solutions, "selfie_segmentation"):
-                raise RuntimeError(f"Could not start MediaPipe segmentation: {tasks_exc}") from tasks_exc
-            log.info("MediaPipe Tasks API unavailable (%s); using legacy selfie_segmentation", tasks_exc)
-            self._legacy = solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+    def __init__(self, model_path: str | os.PathLike | None = None) -> None:
+        path = Path(model_path).expanduser() if model_path else MODEL_PATH
+        if path.suffix.lower() == ".tflite":
+            # Configs from before the ONNX switch pointed at MediaPipe's .tflite download.
+            log.warning("Ignoring segmenter_model %s: the bundled ONNX model replaces it", path)
+            path = MODEL_PATH
+        if not path.is_file():
+            raise FileNotFoundError(f"Segmentation model not found: {path}")
+        self._net = cv2.dnn.readNetFromONNX(str(path))
 
     def segment(self, frame: np.ndarray) -> np.ndarray | None:
-        import mediapipe as mp
-
         h, w = frame.shape[:2]
-        scale = min(1.0, self.work_width / w)
-        small = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
-        rgb = np.ascontiguousarray(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
-        if self._tasks is not None:
-            result = self._tasks.segment(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
-            if not result.confidence_masks:
-                return None
-            mask = np.asarray(result.confidence_masks[-1].numpy_view(), dtype=np.float32)
-        else:
-            result = self._legacy.process(rgb)
-            if result.segmentation_mask is None:
-                return None
-            mask = np.asarray(result.segmentation_mask, dtype=np.float32)
-        mask = mask.reshape(mask.shape[0], mask.shape[1])
+        small = cv2.resize(frame, MODEL_SIZE, interpolation=cv2.INTER_AREA)
+        self._net.setInput(cv2.dnn.blobFromImage(small, 1.0 / 255.0, MODEL_SIZE, swapRB=True))
+        mask = self._net.forward().reshape(MODEL_SIZE[1], MODEL_SIZE[0])
         mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
         return np.clip(mask, 0.0, 1.0, out=mask)
 
     def close(self) -> None:
-        for obj in (self._tasks, self._legacy):
-            if obj is not None:
-                try:
-                    obj.close()
-                except Exception:
-                    pass
-        self._tasks = self._legacy = None
+        self._net = None
 
 
 class LazySegmenter:
@@ -211,7 +136,7 @@ class LazySegmenter:
 
 
 def make_segmenter(kind: str = "auto", model_path: str | None = None) -> Segmenter:
-    """``auto`` / ``mediapipe`` load MediaPipe lazily; ``none`` disables segmentation;
+    """``auto`` loads the bundled selfie segmenter lazily; ``none`` disables segmentation;
     ``synthetic`` finds the person in the synthetic test pattern (for demos)."""
     kind = (kind or "auto").lower()
     if kind == "none":
@@ -220,6 +145,6 @@ def make_segmenter(kind: str = "auto", model_path: str | None = None) -> Segment
         from cambobulator.sources import synthetic_person_mask
 
         return CallableSegmenter(synthetic_person_mask, name="synthetic test pattern")
-    if kind in ("auto", "mediapipe"):
-        return LazySegmenter(lambda: MediaPipeSegmenter(model_path), label="mediapipe")
-    raise ValueError(f"Unknown segmenter {kind!r} (use auto, mediapipe, none or synthetic)")
+    if kind in ("auto", "mediapipe"):  # "mediapipe": configs from before the ONNX switch
+        return LazySegmenter(lambda: SelfieSegmenter(model_path), label="selfie segmenter")
+    raise ValueError(f"Unknown segmenter {kind!r} (use auto, none or synthetic)")

@@ -49,15 +49,11 @@ def frame_of(v=10):
     return np.full((4, 4, 3), v, np.uint8)
 
 
-def test_chain_order_matters():
+def test_filters_run_in_the_order_added():
     p = Pipeline()
-    add = p.add_filter("test_add", params={"n": 1})
-    dbl = p.add_filter("test_double")
+    p.add_filter("test_add", params={"n": 1})
+    p.add_filter("test_double")
     assert px(p.process_frame(frame_of())) == 22  # (10 + 1) * 2
-    p.reorder([dbl.id, add.id])
-    assert px(p.process_frame(frame_of())) == 21  # 10 * 2 + 1
-    p.move(add.id, -1)
-    assert [s.id for s in p.slots] == [add.id, dbl.id]
 
 
 def test_disabled_filters_are_skipped_and_params_apply():
@@ -78,19 +74,6 @@ def test_failing_filter_passes_frame_through_and_reports():
     assert boom.error
 
 
-def test_remove_and_bad_reorder():
-    p = Pipeline()
-    a = p.add_filter("test_add")
-    b = p.add_filter("test_double")
-    v = p.version
-    p.remove_filter(a.id)
-    assert [s.id for s in p.slots] == [b.id] and p.version > v
-    with pytest.raises(ValueError):
-        p.reorder([a.id, b.id])
-    with pytest.raises(KeyError):
-        p.get("missing")
-
-
 def test_unknown_params_from_config_are_ignored():
     p = Pipeline()
     slot = p.add_filter("test_add", params={"n": 3, "bogus": 1})
@@ -99,7 +82,7 @@ def test_unknown_params_from_config_are_ignored():
 
 def test_threaded_run_with_synthetic_source():
     p = Pipeline()
-    p.add_filter("mirror")
+    p.add_filter("test_add", params={"n": 1})
     out = CollectOutput()
     p.add_output("collect", out)
     src = SyntheticSource(64, 48, fps=200)
@@ -113,7 +96,7 @@ def test_threaded_run_with_synthetic_source():
     assert len(out.frames) >= 10
     assert out.closed
     assert raw.shape == processed.shape == (48, 64, 3)
-    assert np.array_equal(processed, raw[:, ::-1])  # the mirror filter ran
+    assert np.array_equal(processed, np.minimum(raw.astype(int) + 1, 255))  # the filter ran
     assert p.stats()["frames"] >= 10
 
 

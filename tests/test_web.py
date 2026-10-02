@@ -29,38 +29,31 @@ def client(controller):
 def test_state_and_index(client):
     assert "Cambobulator" in client.get("/").text
     st = client.get("/api/state").json()
-    assert st["chain"][0]["type"] == "fade_into_background"
+    assert [s["type"] for s in st["chain"]] == ["fade_into_background"]
     assert st["virtual_camera"]["running"] is False
-    assert any(f["type"] == "mirror" for f in st["available_filters"])
 
 
-def test_edit_chain_over_http(client, controller, tmp_path):
+def test_edit_effect_over_http(client, tmp_path):
     fade_id = client.get("/api/state").json()["chain"][0]["id"]
-    r = client.post(f"/api/filters/{fade_id}/params", json={"fade": 0.3, "auto_fade": "true"})
-    assert r.json()["values"] == {"fade": 0.3, "auto_fade": True}
+    r = client.post(f"/api/filters/{fade_id}/params", json={"fade": 0.3, "pixelate": 8, "auto_fade": "true"})
+    assert r.json()["values"] == {"fade": 0.3, "pixelate": 8, "auto_fade": True}
     assert client.post(f"/api/filters/{fade_id}/params", json={"nope": 1}).status_code == 400
+    assert client.post(f"/api/filters/{fade_id}/enabled", json={"enabled": False}).json()["ok"]
+    assert client.get("/api/state").json()["chain"][0]["enabled"] is False
 
-    mirror_id = client.post("/api/filters", json={"type": "mirror"}).json()["id"]
-    client.post(f"/api/filters/{mirror_id}/move", json={"delta": -1})
-    assert [s["id"] for s in client.get("/api/state").json()["chain"]] == [mirror_id, fade_id]
-    client.post("/api/filters/order", json={"ids": [fade_id, mirror_id]})
-    client.post(f"/api/filters/{mirror_id}/enabled", json={"enabled": False})
-    chain = client.get("/api/state").json()["chain"]
-    assert [s["id"] for s in chain] == [fade_id, mirror_id] and chain[1]["enabled"] is False
+    # Autosave writes the config.
+    config = tmp_path / "config.json"
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not (
+            config.exists() and Settings.load(config).filters[0].params.get("pixelate") == 8):
+        time.sleep(0.05)
+    saved = Settings.load(config)
+    assert len(saved.filters) == 1 and saved.filters[0].enabled is False
+    assert saved.filters[0].params["fade"] == 0.3 and saved.filters[0].params["pixelate"] == 8
 
     assert client.post(f"/api/filters/{fade_id}/actions/capture_background").json()["ok"]
+    assert 0 < client.get("/api/state").json()["chain"][0]["status"]["countdown"] <= 5.0
     assert client.post(f"/api/filters/{fade_id}/actions/bogus").status_code == 400
-    assert client.delete(f"/api/filters/{mirror_id}").json()["ok"]
-    assert client.delete("/api/filters/missing").status_code == 404
-
-    # Autosave writes the config (and the captured background plate).
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline and not (tmp_path / f"{fade_id}-background.png").exists():
-        time.sleep(0.05)
-    controller.save()
-    saved = Settings.load(tmp_path / "config.json")
-    assert saved.filters[0].params["fade"] == 0.3 and len(saved.filters) == 1
-    assert (tmp_path / f"{fade_id}-background.png").exists()
 
 
 def test_source_switch_errors_are_reported(client):

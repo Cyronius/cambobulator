@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from cambobulator.filters import FrameContext, create_filter
-from cambobulator.filters.fade import FadeIntoBackground, difference_mask, refine_mask
+from cambobulator.filters.fade import CAPTURE_DELAY, FadeIntoBackground, difference_mask, refine_mask
 from conftest import BOX, MaskBox, make_background, make_frame, make_person_mask
 
 INSIDE = (slice(50, 80), slice(70, 100))  # well inside BOX
@@ -11,13 +11,22 @@ OUTSIDE = (slice(0, 30), slice(0, 40))  # far from BOX
 
 def sharp(seg, **kw):
     """A fade filter with no mask softening, so the math is exact."""
-    params = dict(feather=0, grow=0, bg_learn_rate=0.0, threshold=0.5)
+    params = dict(grow=0, bg_learn_rate=0.0, threshold=0.5)
     params.update(kw)
-    return FadeIntoBackground(segmenter=seg, **params)
+    f = FadeIntoBackground(segmenter=seg, **params)
+    f.feather = 0
+    return f
 
 
 def ctx(t: float, i: int = 0) -> FrameContext:
     return FrameContext(timestamp=t, index=i)
+
+
+def capture(f, frame, t0: float = 0.0):
+    """Press "capture background" and feed ``frame`` until the countdown fires."""
+    f.run_action("capture_background")
+    f.process(frame.copy(), ctx(t0))
+    return f.process(frame.copy(), ctx(t0 + CAPTURE_DELAY + 0.01))
 
 
 def test_fade_zero_is_identity(scene, fake_segmenter):
@@ -74,6 +83,23 @@ def test_grow_expands_mask():
     assert refine_mask(raw, 0.5, grow=0, feather=0)[65, 57] == 0.0
 
 
+@pytest.mark.parametrize("look", [{"brightness": 40}, {"contrast": 2.0}, {"saturation": 0.0}, {"pixelate": 8}])
+def test_person_look_changes_only_the_person(scene, fake_segmenter, look):
+    _, mask, frame = scene
+    person = mask > 0.5
+    frame[BOX] = np.random.default_rng(0).integers(0, 255, frame[BOX].shape, dtype=np.uint8)  # texture to act on
+    out = sharp(fake_segmenter, fade=0.0, **look).process(frame.copy(), ctx(0))
+    assert np.array_equal(out[~person], frame[~person])  # the room, byte for byte
+    assert not np.array_equal(out[person], frame[person])
+
+
+def test_pixelate_blocks_only_average_person_pixels(scene, fake_segmenter):
+    # A flat-coloured person on a gradient wall: blocks along the edge must not pick up wall colour.
+    _, _, frame = scene
+    out = sharp(fake_segmenter, fade=0.0, pixelate=12).process(frame.copy(), ctx(0))
+    assert np.abs(out[BOX].astype(int) - frame[BOX]).max() <= 1
+
+
 def test_rolling_update_tracks_lighting_outside_person(scene, fake_segmenter):
     bg, mask, _ = scene
     f = sharp(fake_segmenter, fade=1.0, bg_learn_rate=0.2)
@@ -115,37 +141,36 @@ def test_learned_plate_fills_in_when_person_moves():
     assert np.array_equal(out[BOX], bg[BOX])  # exact, from the learned plate
 
 
-def test_capture_now(scene, fake_segmenter):
+def test_capture_after_countdown(scene, fake_segmenter):
     bg, mask, frame = scene
     fake_segmenter.mask = np.zeros_like(mask)  # nobody in frame
     f = sharp(fake_segmenter, fade=1.0)
-    f.run_action("capture_background")
-    f.process(bg.copy(), ctx(0))
+    capture(f, bg)
     assert f.has_captured_background
     assert f.status()["warning"] == ""
     fake_segmenter.mask = mask
-    assert np.array_equal(f.process(frame.copy(), ctx(1))[BOX], bg[BOX])
+    assert np.array_equal(f.process(frame.copy(), ctx(10))[BOX], bg[BOX])
 
 
 def test_capture_warns_if_person_present(scene, fake_segmenter):
     _, _, frame = scene
     f = sharp(fake_segmenter)
-    f.run_action("capture_background")
-    f.process(frame.copy(), ctx(0))
+    capture(f, frame)
     assert "ghost" in f.status()["warning"]
 
 
-def test_delayed_capture_uses_frame_timestamps(scene, fake_segmenter):
+def test_capture_countdown_uses_frame_timestamps(scene, fake_segmenter):
     bg, mask, frame = scene
-    f = sharp(fake_segmenter, capture_delay=3.0)
-    f.run_action("capture_background_delayed")
+    f = sharp(fake_segmenter)
+    f.run_action("capture_background")
+    assert f.status()["countdown"] == CAPTURE_DELAY == 5.0
     f.process(frame.copy(), ctx(10.0))
-    assert f.status()["countdown"] == 3.0
-    f.process(frame.copy(), ctx(12.0))
+    assert f.status()["countdown"] == 5.0
+    f.process(frame.copy(), ctx(14.0))
     assert not f.has_captured_background
     assert f.status()["countdown"] == 1.0
     fake_segmenter.mask = np.zeros_like(mask)
-    f.process(bg.copy(), ctx(13.01))
+    f.process(bg.copy(), ctx(15.01))
     assert f.has_captured_background
     assert f.status()["countdown"] is None
 
@@ -204,6 +229,18 @@ def test_auto_fade_ramps_when_still_and_drops_on_motion(scene, fake_segmenter):
     assert f.status()["effective_fade"] < 0.3
 
 
+def test_auto_fade_also_scales_the_person_look(scene, fake_segmenter):
+    _, mask, frame = scene
+    person = mask > 0.5
+    f = sharp(fake_segmenter, fade=0.0, brightness=40, auto_fade=True, auto_ramp_seconds=1.0)
+    assert np.array_equal(f.process(frame.copy(), ctx(0)), frame)  # level 0: no look yet
+    for i in range(1, 40):  # ~1.3 s of stillness
+        out = f.process(frame.copy(), ctx(i / 30, i))
+    assert f.status()["auto_level"] == 1.0
+    assert np.array_equal(out[person], frame[person].astype(int) + 40)
+    assert np.array_equal(out[~person], frame[~person])
+
+
 def test_shimmer_runs_and_vanishes_at_full_fade(scene, fake_segmenter):
     bg, _, frame = scene
     plain = sharp(fake_segmenter, fade=1.0)
@@ -248,7 +285,7 @@ def test_save_and_load_assets(tmp_path, scene, fake_segmenter):
 def test_registry_creates_fade_with_defaults(fake_segmenter):
     f = create_filter("fade_into_background", segmenter=fake_segmenter, fade=2.0)
     assert f["fade"] == 1.0  # clamped
-    assert {p["name"] for p in f.describe()["params"]} >= {"fade", "feather", "threshold"}
+    assert {p["name"] for p in f.describe()["params"]} >= {"fade", "pixelate", "threshold"}
     with pytest.raises(KeyError):
         f.run_action("nope")
 

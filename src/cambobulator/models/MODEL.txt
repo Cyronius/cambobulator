@@ -1,0 +1,12 @@
+selfie_segmenter_landscape.onnx
+
+MediaPipe's "Selfie Segmenter (landscape)" person-segmentation model, converted from
+  https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/latest/selfie_segmenter_landscape.tflite
+  (tflite sha256 490e9ea734313e0de10fa0cd9e3c6133e36ea4db2b7a49bde9ef019f72796b8e)
+to ONNX by scripts/convert_segmenter.py (tf2onnx, plus one custom op replaced by ConvTranspose).
+
+Model by Google (MediaPipe), Apache License 2.0: https://github.com/google-ai-edge/mediapipe
+
+Input:  "input_1", float32 1x3x144x256, RGB, values in [0, 1].
+Output: "segment_back", float32 1x1x144x256, probability that the pixel is a person.
+Runs with OpenCV's dnn module 4.9 or newer; matches MediaPipe's output to ~1e-5.
